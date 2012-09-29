@@ -29,7 +29,8 @@ public class IbEsper
         IbDataProvider dataProvider = new IbDataProvider(epService);
         
         try {
-			dataProvider.requestMarketData(ContractFactory.createEquity("VXX"), false);
+			dataProvider.requestLiveMarketData(ContractFactory.createEquity("VXX"), false);
+			
 		} catch (InvalidContractException ex) {
 			log.error("Could not instantiate VXX", ex);
 		}

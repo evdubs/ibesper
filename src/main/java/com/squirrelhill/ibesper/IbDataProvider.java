@@ -1,5 +1,6 @@
 package com.squirrelhill.ibesper;
 
+import java.text.SimpleDateFormat;
 import java.util.Date;
 
 import org.apache.log4j.Logger;
@@ -16,9 +17,12 @@ import com.ib.client.OrderState;
 import com.ib.client.TickType;
 import com.ib.client.UnderComp;
 import com.squirrelhill.ibesper.event.TickPriceEvent;
+import com.squirrelhill.ibesper.ibmodel.NegativeTimeException;
 
 public class IbDataProvider implements EWrapper {
 	private static Logger log = Logger.getLogger(IbDataProvider.class);
+	
+	private static SimpleDateFormat endDateFormat = new SimpleDateFormat("yyyymmdd hh:mm:ss zzz");
 
 	private EClientSocket ibSocket;
 	private EPServiceProvider epService;
@@ -111,13 +115,60 @@ public class IbDataProvider implements EWrapper {
 		// TODO Auto-generated method stub
 
 	}
+	
+	/**
+	 * Convert the given datetimes into the format "N S" where N is the
+	 * amount of seconds between the range.
+	 * 
+	 * @param startDate Starting time
+	 * @param endDate Ending time
+	 * @return "N S" formatted string
+	 * @throws NegativeTimeException startDate > endDate
+	 */
+	private String generateSecondDuration(Date startDate, Date endDate) 
+			throws NegativeTimeException {
+		if (endDate.getTime() - startDate.getTime() < 0)
+			throw new NegativeTimeException("Cannot generate second duration " +
+					"between (" + startDate + ", " + endDate + ")");
+		long millis = endDate.getTime() - startDate.getTime();
+		
+		return (millis / 1000) + " S";
+	}
+	
+	/**
+	 * Request trades and bid/ask historical market data. This method
+	 * requests the highest resolution available (1 second) and returns
+	 * times in the number of seconds since the Unix epoch.
+	 * 
+	 * @param contract Contract to request market data for
+	 * @param startDate Starting time
+	 * @param endDate Ending time
+	 * @throws NegativeTimeException startDate > endDate
+	 */
+	public void requestHistoricalMarketData(Contract contract, Date startDate, 
+			Date endDate) throws NegativeTimeException {
+		if (ibSocket.isConnected()) {
+			String duration = generateSecondDuration(startDate, endDate);
+			
+			requestIdContractMap.put(latestRequestId, contract);
+			ibSocket.reqHistoricalData(latestRequestId++, contract, 
+					endDateFormat.format(endDate), duration, "1 sec", 
+					"TRADES", 0, 2);
+			
+			requestIdContractMap.put(latestRequestId, contract);
+			ibSocket.reqHistoricalData(latestRequestId++, contract, 
+					endDateFormat.format(endDate), duration, "1 sec", 
+					"BID_ASK", 0, 2);
+		} else {
+			log.warn("Tried to request market data while not connected");
+		}
+	}
 
 	@Override
-	public void historicalData(int arg0, String arg1, double arg2, double arg3,
-			double arg4, double arg5, int arg6, int arg7, double arg8,
-			boolean arg9) {
-		// TODO Auto-generated method stub
-
+	public void historicalData(int requestId, String formattedDate, double openPrice, double highPrice,
+			double lowPrice, double closePrice, int volume, int tradeCount, double weightedAverage,
+			boolean hasGaps) {
+		int i = 0;
 	}
 
 	@Override
@@ -195,7 +246,7 @@ public class IbDataProvider implements EWrapper {
 	 * @param contract Contract to request market data for
 	 * @param snapshot True for just one snapshot; False for streaming data
 	 */
-	public void requestMarketData(Contract contract, boolean snapshot) {
+	public void requestLiveMarketData(Contract contract, boolean snapshot) {
 		if (ibSocket.isConnected()) {
 			requestIdContractMap.put(latestRequestId, contract);
 			ibSocket.reqMktData(latestRequestId++, contract, null, snapshot);
