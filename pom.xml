@@ -37,14 +37,14 @@
     	<version>0.4.1</version>
     </dependency>
     <dependency>
-    	<groupId>monetdb</groupId>
-    	<artifactId>monetdb-jdbc</artifactId>
-    	<version>[2,3]</version>
-    </dependency>
-    <dependency>
     	<groupId>joda-time</groupId>
     	<artifactId>joda-time</artifactId>
     	<version>2.1</version>
+    </dependency>
+    <dependency>
+    	<groupId>org.xerial</groupId>
+    	<artifactId>sqlite-jdbc</artifactId>
+    	<version>3.7.2</version>
     </dependency>
   </dependencies>
   

@@ -2,11 +2,13 @@ package com.squirrelhill.ibesper;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.log4j.Logger;
 
 import com.carrotsearch.hppc.IntObjectOpenHashMap;
 import com.espertech.esper.client.EPServiceProvider;
+import com.ib.client.CommissionReport;
 import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.EClientSocket;
@@ -16,27 +18,31 @@ import com.ib.client.Order;
 import com.ib.client.OrderState;
 import com.ib.client.TickType;
 import com.ib.client.UnderComp;
+import com.squirrelhill.ibesper.event.MarketDataBarEvent;
 import com.squirrelhill.ibesper.event.TickPriceEvent;
+import com.squirrelhill.ibesper.ibmodel.MarketDataBarType;
 import com.squirrelhill.ibesper.ibmodel.NegativeTimeException;
 
-public class IbDataProvider implements EWrapper {
-	private static Logger log = Logger.getLogger(IbDataProvider.class);
+public class IbDataProducer implements EWrapper {
+	private static Logger log = Logger.getLogger(IbDataProducer.class);
 	
-	private static SimpleDateFormat endDateFormat = new SimpleDateFormat("yyyymmdd hh:mm:ss zzz");
+	private static SimpleDateFormat endDateFormat = new SimpleDateFormat("yyyyMMdd hh:mm:ss");
+	
+	private static final long SIX_MONTHS_IN_MILLIS = 15775800000L;
 
 	private EClientSocket ibSocket;
 	private EPServiceProvider epService;
 	private IntObjectOpenHashMap<Contract> requestIdContractMap;
-	private int latestRequestId;
+	private IntObjectOpenHashMap<AsyncCallback<MarketDataBarEvent>> requestIdBarCallbackMap;
+	private AtomicInteger latestRequestId;
 
-	public IbDataProvider(EPServiceProvider epService) {
-		this.epService = epService;
-		
-		latestRequestId = 0;
+	public IbDataProducer() {
+		latestRequestId = new AtomicInteger(0);
 		ibSocket = new EClientSocket(this);
 		ibSocket.eConnect("127.0.0.1", 7496, 1);
 		
 		requestIdContractMap = new IntObjectOpenHashMap<Contract>();
+		requestIdBarCallbackMap = new IntObjectOpenHashMap<AsyncCallback<MarketDataBarEvent>>();
 	}
 
 	@Override
@@ -45,21 +51,19 @@ public class IbDataProvider implements EWrapper {
 	}
 
 	@Override
-	public void error(Exception arg0) {
-		// TODO Auto-generated method stub
-
+	public void error(Exception e) {
+		log.error("Received an exception from EClientSocket", e);
 	}
 
 	@Override
-	public void error(String arg0) {
-		// TODO Auto-generated method stub
-
+	public void error(String str) {
+		log.error("Received an error from EClientSocket: \n" + str);
 	}
 
 	@Override
-	public void error(int arg0, int arg1, String arg2) {
-		// TODO Auto-generated method stub
-
+	public void error(int tickerId, int errorCode, String errorString) {
+		// TODO Provide translations for error codes
+		log.error("Received an error(" + errorCode + ") from EClientSocket: \n" + errorString);
 	}
 
 	@Override
@@ -136,9 +140,10 @@ public class IbDataProvider implements EWrapper {
 	}
 	
 	/**
-	 * Request trades and bid/ask historical market data. This method
-	 * requests the highest resolution available (1 second) and returns
-	 * times in the number of seconds since the Unix epoch.
+	 * Request historical market data. This method
+	 * requests the highest resolution available (see 
+	 * <a href="http://www.interactivebrokers.com/en/software/api/apiguide/api/historical_data_limitations.htm">here</a> 
+	 * for more info).
 	 * 
 	 * @param contract Contract to request market data for
 	 * @param startDate Starting time
@@ -146,19 +151,29 @@ public class IbDataProvider implements EWrapper {
 	 * @throws NegativeTimeException startDate > endDate
 	 */
 	public void requestHistoricalMarketData(Contract contract, Date startDate, 
-			Date endDate) throws NegativeTimeException {
+			Date endDate, MarketDataBarType barType, AsyncCallback<MarketDataBarEvent> cb) 
+					throws NegativeTimeException {
+		String barPeriod = "1 secs";
+		
+		if (endDate.getTime() - startDate.getTime() > SIX_MONTHS_IN_MILLIS)
+			barPeriod = "1 min";
+		
 		if (ibSocket.isConnected()) {
 			String duration = generateSecondDuration(startDate, endDate);
 			
-			requestIdContractMap.put(latestRequestId, contract);
-			ibSocket.reqHistoricalData(latestRequestId++, contract, 
-					endDateFormat.format(endDate), duration, "1 sec", 
-					"TRADES", 0, 2);
+			int requestId = latestRequestId.incrementAndGet();
 			
-			requestIdContractMap.put(latestRequestId, contract);
-			ibSocket.reqHistoricalData(latestRequestId++, contract, 
-					endDateFormat.format(endDate), duration, "1 sec", 
-					"BID_ASK", 0, 2);
+			synchronized (requestIdContractMap) {
+				requestIdContractMap.put(requestId, contract);
+			}
+			
+			synchronized (requestIdBarCallbackMap) {
+				requestIdBarCallbackMap.put(requestId, cb);
+			}
+			
+			ibSocket.reqHistoricalData(requestId, contract, 
+					endDateFormat.format(endDate), duration, barPeriod, 
+					MarketDataBarType.getIbString(barType), 0, 2);
 		} else {
 			log.warn("Tried to request market data while not connected");
 		}
@@ -168,7 +183,34 @@ public class IbDataProvider implements EWrapper {
 	public void historicalData(int requestId, String formattedDate, double openPrice, double highPrice,
 			double lowPrice, double closePrice, int volume, int tradeCount, double weightedAverage,
 			boolean hasGaps) {
-		int i = 0;
+		Contract c = null;
+		
+		synchronized (requestIdContractMap) {
+			c = requestIdContractMap.get(requestId);
+		}
+		
+		MarketDataBarEvent barEvent = new MarketDataBarEvent();
+		barEvent.setContract(c);
+		
+		Date dateTime = new Date(Long.parseLong(formattedDate));
+		barEvent.setDateTime(dateTime);
+		
+		barEvent.setOpenPrice(openPrice);
+		barEvent.setHighPrice(highPrice);
+		barEvent.setLowPrice(lowPrice);
+		barEvent.setClosePrice(closePrice);
+		barEvent.setVolume(volume);
+		barEvent.setVwap(weightedAverage);
+		barEvent.setHasGaps(hasGaps);
+		
+		AsyncCallback<MarketDataBarEvent> cb = null;
+		
+		synchronized (requestIdBarCallbackMap) {
+			cb = requestIdBarCallbackMap.get(requestId);
+		}
+		
+		if (cb != null)
+			cb.onSuccess(barEvent);
 	}
 
 	@Override
@@ -248,8 +290,14 @@ public class IbDataProvider implements EWrapper {
 	 */
 	public void requestLiveMarketData(Contract contract, boolean snapshot) {
 		if (ibSocket.isConnected()) {
-			requestIdContractMap.put(latestRequestId, contract);
-			ibSocket.reqMktData(latestRequestId++, contract, null, snapshot);
+			int requestId = latestRequestId.incrementAndGet();
+			
+			synchronized (requestIdContractMap) {
+				requestIdContractMap.put(requestId, contract);
+			}
+			
+			requestIdContractMap.put(requestId, contract);
+			ibSocket.reqMktData(requestId, contract, null, snapshot);
 		} else {
 			log.warn("Tried requesting market data while not connected");
 		}
@@ -345,6 +393,12 @@ public class IbDataProvider implements EWrapper {
 			double arg3, double arg4, double arg5, double arg6, String arg7) {
 		// TODO Auto-generated method stub
 
+	}
+
+	@Override
+	public void commissionReport(CommissionReport arg0) {
+		// TODO Auto-generated method stub
+		
 	}
 
 }
